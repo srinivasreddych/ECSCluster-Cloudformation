@@ -1,0 +1,53 @@
+Description: >
+    Template creates ECSTaskRole for any chosen service to access S3
+
+Parameters:
+
+    IAMPolicyName:
+        Description: Name the policy which is to be attached to TaskRole
+        Type: String
+        
+    S3Bucket:
+        Description: Enter the S3Bucket to be accessed
+        Type: String
+    
+    IAMRoleName:
+        Description: Name the Role which is to be attached 
+        Type: String    
+        
+Resources:
+    TaskRole:
+        Type: AWS::IAM::Role
+        Properties:
+            AssumeRolePolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Principal:
+                    Service: "ecs-tasks.amazonaws.com"
+                  Action:
+                    - "sts:AssumeRole"
+            ManagedPolicyArns:
+              - "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+            Path: "/"
+            RoleName: !Ref IAMRoleName
+            
+    TaskPolicies:
+        Type: "AWS::IAM::Policy"
+        Properties: 
+            PolicyName: !Ref IAMPolicyName
+            PolicyDocument: 
+                Version: "2012-10-17"
+                Statement: 
+                  - 
+                    Effect: "Allow"
+                    Action: "s3:ListBucket"
+                    Resource:
+                      Fn::Join: ['', ['arn:aws:s3:::', {Ref: S3Bucket}]]
+                  - 
+                    Effect: "Allow"
+                    Action: "s3:*"
+                    Resource:
+                      Fn::Join: ['', ['arn:aws:s3:::', {Ref: S3Bucket}, '/*' ]]
+              - 
+                Ref: "TaskRole"
