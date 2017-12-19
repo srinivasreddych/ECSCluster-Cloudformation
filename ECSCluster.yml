@@ -1,0 +1,203 @@
+Description: >
+    Template creates/deploys an ECS cluster to the provided VPC and subnets 
+    using an Auto Scaling Group.
+
+Parameters:
+
+    EnvironmentName:
+        Description: An environment name that will be prefixed to resource names
+        Type: String
+
+    InstanceType: 
+        Description: Which instance type should we use to build the ECS cluster?
+        Type: String
+        Default: t2.micro
+
+    ClusterSize:
+        Description: How many ECS hosts do you want to initially deploy?
+        Type: Number
+        Default: 4
+
+    VPC:
+        Description: Choose which VPC this ECS cluster should be deployed to
+        Type: AWS::EC2::VPC::Id
+
+    ECSSubnets:
+        Description: Choose which subnets this ECS cluster should be deployed to
+        Type: List<AWS::EC2::Subnet::Id>
+
+    ECSSecurityGroup:
+        Description: Select the Security Group to use for the ECS cluster hosts
+        Type: List<AWS::EC2::SecurityGroup::Id>
+    
+    KeyPair:
+        Description: EC2 key pair to use
+        Type: AWS::EC2::KeyPair::KeyName
+        
+
+Mappings:
+
+    AWSRegionToAMI:
+        us-east-1:
+            AMI: ami-xyz123
+
+Resources:
+
+    ECSCluster:
+        Type: AWS::ECS::Cluster
+        Properties:
+            ClusterName: !Ref EnvironmentName
+
+    ECSAutoScalingGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties: 
+            VPCZoneIdentifier: !Ref ECSSubnets
+            LaunchConfigurationName: !Ref ECSLaunchConfiguration
+            MinSize: !Ref ClusterSize
+            MaxSize: !Ref ClusterSize
+            DesiredCapacity: !Ref ClusterSize
+            Tags: 
+                - Key: Name
+                  Value: !Sub ${EnvironmentName} ECS host
+                  PropagateAtLaunch: true
+                - Key: ApplicationName
+                  Value: !Ref ApplicationName
+                  PropagateAtLaunch: true
+        CreationPolicy:
+            ResourceSignal: 
+                Timeout: PT5M
+        UpdatePolicy:
+            AutoScalingRollingUpdate:
+                MinInstancesInService: 1
+                MaxBatchSize: 1
+                PauseTime: PT5M
+                SuspendProcesses:
+                  - HealthCheck
+                  - ReplaceUnhealthy
+                  - AZRebalance
+                  - AlarmNotification
+                  - ScheduledActions
+                WaitOnResourceSignals: true
+        
+    ECSLaunchConfiguration:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Properties:
+            ImageId:  !FindInMap [AWSRegionToAMI, !Ref "AWS::Region", AMI]
+            InstanceType: !Ref InstanceType
+            SecurityGroups: !Ref ECSSecurityGroup
+            KeyName: !Ref KeyPair
+            IamInstanceProfile: !Ref ECSInstanceProfile
+            UserData: 
+                "Fn::Base64": !Sub |
+                    #!/bin/bash -x
+                    #Command to shell out the user-data output to a file in /var/log/
+                    exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+                    #To install docker agent
+                    docker pull amazon/amazon-ecs-agent:latest
+                    docker run --name ecs_agent --net=host -d -v /var/run/docker.sock:/var/run/docker.sock -v /var/log/ecs/:/log -v /var/lib/ecs/data:/data -p 127.0.0.1:51678:51678 -e ECS_LOGFILE=/log/ecs-agent.log -e ECS_LOGLEVEL=info -e ECS_DATADIR=/data -e ECS_CLUSTER=${ECSCluster} -e ECS_ENABLE_TASK_IAM_ROLE=true -e ECS_AVAILABLE_LOGGING_DRIVERS='["fluentd","syslog","journald"]' --log-driver=syslog --log-opt tag="{{.ImageName}}"  --privileged --restart always amazon/amazon-ecs-agent:latest
+                    
+
+    ECSRole:
+        Type: AWS::IAM::Role
+        Properties: 
+            Path: /
+            RoleName: !Sub ${EnvironmentName}-ECSRole-${AWS::Region}
+            AssumeRolePolicyDocument: |
+                {
+                    "Statement": [{
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": { 
+                            "Service": "ec2.amazonaws.com" 
+                        }
+                    }]
+                }
+            Policies: 
+                - PolicyName: ecs-service
+                  PolicyDocument: |
+                    {
+                        "Statement": [{
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecs:CreateCluster",
+                                "ecs:DeregisterContainerInstance",
+                                "ecs:DiscoverPollEndpoint",
+                                "ecs:Poll",
+                                "ecs:RegisterContainerInstance",
+                                "ecs:StartTelemetrySession",
+                                "ecs:Submit*",
+                                "logs:CreateLogStream",
+                                "logs:PutLogEvents",
+                                "ecr:BatchCheckLayerAvailability",
+                                "ecr:BatchGetImage",
+                                "ecr:GetDownloadUrlForLayer",
+                                "ecr:GetAuthorizationToken"
+                            ],
+                            "Resource": "*"
+                        }]
+                    }
+
+    ECSInstanceProfile: 
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Path: /
+            Roles: 
+                - !Ref ECSRole
+    
+    ScaleUpPolicy:
+        Type: AWS::AutoScaling::ScalingPolicy
+        Properties:
+            AdjustmentType: ChangeInCapacity
+            AutoScalingGroupName:
+                Ref: ECSAutoScalingGroup
+            Cooldown: '2700'
+            ScalingAdjustment: '1'
+
+    CPUAlarmHigh:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            EvaluationPeriods: '4'
+            Statistic: Average
+            Threshold: '75'
+            AlarmDescription: Scale up if CPU > 75% average over 20 minutes
+            Period: '180'
+            AlarmActions:
+            - Ref: ScaleUpPolicy
+            Namespace: AWS/EC2
+            Dimensions:
+            - Name: AutoScalingGroupName
+              Value: !Ref ECSAutoScalingGroup
+            ComparisonOperator: GreaterThanThreshold
+            MetricName: CPUUtilization
+
+    ScaleDownPolicy:
+        Type: AWS::AutoScaling::ScalingPolicy
+        Properties:
+            AdjustmentType: ChangeInCapacity
+            AutoScalingGroupName:
+                Ref: ECSAutoScalingGroup
+            Cooldown: '3300'
+            ScalingAdjustment: '1'
+
+    CPUAlarmLow:
+        Type: AWS::CloudWatch::Alarm
+        Properties:
+            EvaluationPeriods: '5'
+            Statistic: Average
+            Threshold: '25'
+            AlarmDescription: Scale out if CPU <= 25% average over 25 minutes
+            Period: '300'
+            AlarmActions:
+            - Ref: ScaleDownPolicy
+            Namespace: AWS/EC2
+            Dimensions:
+            - Name: AutoScalingGroupName
+              Value: !Ref ECSAutoScalingGroup
+            ComparisonOperator: LessThanOrEqualToThreshold
+            MetricName: CPUUtilization
+
+Outputs:
+
+    Cluster:
+        Description: A reference to the ECS cluster
+        Value: !Ref ECSCluster
