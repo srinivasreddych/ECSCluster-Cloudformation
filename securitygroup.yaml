@@ -1,0 +1,42 @@
+Description: >
+    This template contains the security groups required by our entire stack.
+    
+Parameters:
+
+    EnvironmentName:
+        Description: An  name that will be prefixed to resource names
+        Type: String
+
+    VPC:
+        Type: AWS::EC2::VPC::Id
+        Description: Choose which VPC the security groups should be deployed to
+        
+    SSHLocation:
+        Type: String
+        Description: Enter CIDR of SSH
+Resources:
+
+    SecurityGroup:
+        Type: 'AWS::EC2::SecurityGroup'
+        Properties:
+            GroupDescription: Enable HTTP access via port 80 locked down to SSH access.
+            VpcId:
+                Ref: VPC
+            SecurityGroupIngress:
+                - 
+                    IpProtocol: tcp
+                    FromPort: '80'
+                    ToPort: '80'
+                    CidrIp: 0.0.0.0/0
+                - 
+                    IpProtocol: tcp
+                    FromPort: '22'
+                    ToPort: '22'
+                    CidrIp:
+                        Ref: SSHLocation
+
+Outputs:
+
+    SecurityGroup:
+        Description: A reference to the security group for EC2(this returns ID)
+        Value: !Ref SecurityGroup
